@@ -1,0 +1,12 @@
+# 대용량 스캔 데이터 - GitHub에 올리지 않음
+USDZ/
+output/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# 에디터
+.vscode/
+*.swp
