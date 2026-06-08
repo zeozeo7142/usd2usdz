@@ -1,7 +1,7 @@
 """
 Step 2: USD 파일 내부 구조 분석 스크립트
 사용법: python inspect_usd.py "<usd_file_path>"
-예시:  python inspect_usd.py "USDZ\USDZ_ERTI1\lcc-usd-result\260521_ERTI 1.usd"
+예시:  python inspect_usd.py "USDZ/USDZ_ERTI1/lcc-usd-result/260521_ERTI 1.usd"
 """
 
 import sys

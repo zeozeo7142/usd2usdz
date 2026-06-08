@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/zeozeo/git/InternNav/**)",
+      "Bash(docker pull *)",
+      "Bash(docker manifest *)",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' https://nvcr.io/v2/nvidia/isaac-sim/tags/list)",
+      "Read(//home/zeozeo/.docker/**)",
+      "Bash(docker run *)",
+      "WebSearch"
+    ]
+  }
+}

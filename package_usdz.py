@@ -3,7 +3,7 @@ Step 6: USD + 모든 에셋을 USDZ 아카이브로 패키징
 build_combined_usd.py가 생성한 *_combined.usda를 입력으로 사용합니다.
 
 사용법: python package_usdz.py --index 1 [--output-dir output]
-출력:   output/ERTI1/260521_ERTI_1.usdz
+출력:   output/USDZ_ETRI1/260521_ERTI_1.usdz
 """
 
 import os
