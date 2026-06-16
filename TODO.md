@@ -185,13 +185,115 @@
 
 ---
 
+## Step 7: 로봇 보행용 평탄 충돌 환경 생성
+
+> 복원 메쉬가 울퉁불퉁해 로봇 주행 불가 → 비주얼(GS+메쉬)은 그대로 두고
+> 로봇이 밟는 *충돌 지오메트리*만 평탄 슬랩 + 벽 collider로 분리한다.
+> 추가 패키지 없이 numpy + usd-core(pxr)만 사용.
+
+- [x] **7-1.** `make_collision_env.py` 실행 (ETRI1)
+  ```bash
+  python3 make_collision_env.py --index 1 --floor-shape slab --friction 0.9
+  # → output/USDZ_ETRI1/260521_ERTI_1_collision.usdc  (충돌 전용: 평탄 바닥 + 벽 collider)
+  # → output/USDZ_ETRI1/260521_ERTI_1_robot.usda      (Isaac 로드용 최상위 씬)
+  ```
+  > ⚠️ PortalCam 데이터는 **Z-up**이다. 스크립트가 up-axis를 자동 감지하므로
+  > 임의로 `rotateX=90`을 넣지 말 것(넣으면 물리 중력과 바닥이 어긋나 로봇이 옆으로 누움).
+
+- [x] **7-2.** Isaac Sim 5.1에서 `260521_ERTI_1_robot.usda` 열기 → 검증
+  | 확인 항목 | 성공 기준 |
+  |-----------|-----------|
+  | 바닥 수평 | 로봇이 옆으로 안 눕고 바로 섬 |
+  | Physics debug view | `FloorCollider` 슬랩이 바닥 높이 수평 박스, 벽 collider가 벽을 감쌈 |
+  | 비주얼 | GS + 비주얼 메쉬는 그대로(collider만 평탄) |
+
+- [ ] **7-3.** ETRI2/3 적용 (파일 수신 후)
+  ```bash
+  # ETRI2: 층별 평면 + 메쉬 계단,  ETRI3: 지배적 지면만 평탄화
+  python3 make_collision_env.py --index 2 --levels auto --floor-shape slab
+  python3 make_collision_env.py --index 3 --levels dominant --floor-shape slab
+  ```
+
+---
+
+## Step 8: 휠로봇(Jackal) WASD 텔레옵 주행 검증
+
+- [x] **8-1.** Isaac Sim 5.1(GUI) 실행
+  ```bash
+  cd ~/git/InternNav && ./run-isaac-sim-5.1.sh
+  ```
+
+- [x] **8-2.** 컨테이너 안에서 텔레옵 스크립트 실행
+  ```bash
+  /isaac-sim/python.sh /home/zeozeo/git/usd2usdz/teleop_test.py --index 1
+  # W/S = 전/후진, A/D = 좌/우 회전
+  # → Jackal이 평탄 바닥 위를 1.5m 이상 정상 주행하면 성공
+  ```
+  > ⚠️ standalone 루프에서 `sim_app.update()`를 호출하지 말 것(이중 스텝 → 물리 불안정,
+  > 후진이 전진보다 빠르고 들썩임). `world.step(render=True)`만 사용한다.
+
+---
+
+## Step 9: LiDAR / 카메라 센서 → ROS2 → RViz2 시각화
+
+> Jackal에 **PhysX LiDAR(Ouster급)** + **RGB 카메라(GS 영상)** 부착.
+> PhysX LiDAR는 충돌 collider를 레이캐스트하므로, 카메라용으로 VisualMesh를 숨겨도(=GS만 촬영) LiDAR는 정상 동작.
+
+- [x] **9-1.** ROS2 + RViz 컨테이너 이미지 준비 (osrf 공식, BSD/Apache)
+  ```bash
+  docker pull osrf/ros:humble-desktop
+  ```
+
+- [x] **9-2.** UDP 전용 FastDDS 프로파일 확인 (컨테이너 간 DDS 데이터 전달 필수)
+  ```bash
+  cat /home/zeozeo/git/usd2usdz/fastdds_udp.xml   # UDPv4 전용, useBuiltinTransports=false
+  ```
+  > ⚠️ Isaac 번들 FastDDS와 osrf humble 간 공유메모리(SHM) 버전 불일치로 데이터가 안 건너온다.
+  > **양쪽 컨테이너 모두** `--ipc=host` + `FASTRTPS_DEFAULT_PROFILES_FILE=.../fastdds_udp.xml` 필요.
+  > (`run-isaac-sim-5.1.sh`, `run-rviz.sh` 둘 다 적용됨)
+
+- [x] **9-3.** Isaac Sim(GUI) 컨테이너에서 센서 스크립트 실행
+  ```bash
+  export FASTRTPS_DEFAULT_PROFILES_FILE=/home/zeozeo/git/usd2usdz/fastdds_udp.xml
+  /isaac-sim/python.sh /home/zeozeo/git/usd2usdz/sensor_drive.py --index 1
+  # 발행 토픽: /clock /tf /point_cloud(PointCloud2) /rgb(Image)
+  ```
+  > ⚠️ GS는 GUI 뷰포트에서만 렌더된다(헤드리스 render product에는 검게 나옴).
+  > 카메라에 GS를 담으려면 GUI 세션에서 실행하고, 뷰포트에서 VisualMesh/Colliders는 끄고 GS만 켜 둔다.
+
+- [x] **9-4.** 별도 터미널에서 RViz2 실행
+  ```bash
+  /home/zeozeo/git/usd2usdz/run-rviz.sh
+  # → sensors.rviz 로드: PointCloud2(/point_cloud), Image(/rgb), TF, Grid
+  ```
+  > ⚠️ 권한 오류 시: `chmod +x /home/zeozeo/git/usd2usdz/run-rviz.sh`
+
+- [x] **9-5.** 확인 항목
+  | 항목 | 성공 기준 |
+  |------|-----------|
+  | /point_cloud | RViz에 LiDAR 포인트클라우드 표시, 로봇과 함께 이동 |
+  | 포인트클라우드 전체 표시 | `sensors.rviz`의 PointCloud2 **Decay Time 0.5** → 1/4 깜빡임 없이 전체 누적 표시 |
+  | /rgb | 카메라 영상이 **포토리얼 GS**(회색 메쉬 아님) |
+  | QoS | PointCloud2/Image 모두 **Best Effort** |
+
+  > 실제 Ouster OS1-128 사양 근사: `--lidar-vfov 45 --lidar-vres 0.35 --lidar-hres 0.35 --lidar-range 120`
+  > (레이 수가 많아 무거움. 기본값 `--lidar-vfov 30 --lidar-vres 1.0 --lidar-hres 0.4`는 ~27k pts로 가벼움)
+
+---
+
 ## 필요 파일 요약
 
 ```
 output/USDZ_ETRI1/
-├── 260521_ERTI_1_nurec_mesh.usda   ← Isaac Sim에서 열 파일
+├── 260521_ERTI_1_nurec_mesh.usda   ← GS+Mesh 렌더링용 (Step 6)
 ├── 260521_ERTI_1_nurec.usdz        ← GS (NuRec 포맷, 348 MB)
-└── 260521_ERTI_1_mesh.obj          ← Mesh (1.7 MB)
+├── 260521_ERTI_1_mesh.obj          ← Mesh (1.7 MB)
+├── 260521_ERTI_1_collision.usdc    ← 평탄 충돌 지오메트리 (Step 7)
+└── 260521_ERTI_1_robot.usda        ← 로봇 주행/센서용 로드 파일 (Step 7~9)
+
+# 프로젝트 루트 (로봇/센서 도구)
+make_collision_env.py   teleop_test.py   sensor_drive.py
+fastdds_udp.xml   run-rviz.sh   sensors.rviz
 ```
 
 ---

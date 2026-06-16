@@ -200,8 +200,9 @@ def _compact(points, sel_faces):
     return points[used].astype(np.float32), inverse.reshape(-1, 3).astype(np.int32)
 
 
-def build_collision_geometry(points, faces, centroids, up_mask, levels):
-    """반환: (obstacle_pts, obstacle_faces, floor_meshes)
+def build_collision_geometry(points, faces, centroids, floor_face_mask, levels):
+    """floor_face_mask: 바닥으로 간주해 제거할 후보(밴드와 무관, 방향 기준).
+    반환: (obstacle_pts, obstacle_faces, floor_meshes)
     floor_meshes = [(pts, faces, z), ...]  (각 pts는 Z가 level_z로 평탄화됨)
     """
     cu = centroids[:, UP]
@@ -209,7 +210,7 @@ def build_collision_geometry(points, faces, centroids, up_mask, levels):
     floor_meshes = []
 
     for l in levels:
-        mask_L = up_mask & (cu >= l["z"] - l["t_below"]) & \
+        mask_L = floor_face_mask & (cu >= l["z"] - l["t_below"]) & \
                  (cu <= l["z"] + l["t_above"])
         floor_mask |= mask_L
         pts_L, faces_L = _compact(points, faces[mask_L])
@@ -250,7 +251,14 @@ def compute_spawn(floor_meshes, obstacle_pts):
         c = fs[int(np.argmax(d))]
         print(f"[compute_spawn] 열린 바닥 지점 장애물거리 {d.max()**0.5:.2f}m")
     center[ax[0]], center[ax[1]], center[UP] = float(c[0]), float(c[1]), float(fz)
-    return tuple(center)
+
+    # 스폰 방향(yaw): 바닥 footprint 주축 = 복도 길이방향 → 로봇이 벽이 아니라
+    # 열린 방향을 보게 한다. ax[0]를 X로 간주한 평면 내 yaw(rad).
+    fc = fxy - fxy.mean(0)
+    eigval, eigvec = np.linalg.eigh(fc.T @ fc)
+    axis_v = eigvec[:, int(np.argmax(eigval))]
+    yaw = float(np.arctan2(axis_v[1], axis_v[0]))
+    return (center[0], center[1], center[2], yaw)
 
 
 # --------------------------------------------------------------------------- #
@@ -288,11 +296,31 @@ def _author_floor_slab(stage, path, level):
     UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
     UsdGeom.Imageable(cube.GetPrim()).CreateVisibilityAttr(
         UsdGeom.Tokens.invisible)
+    return cube.GetPrim()
+
+
+def _make_physics_material(stage, path, static_f, dynamic_f):
+    """마찰 물리 물성 생성. 바닥/벽에 바인딩하면 바퀴가 헛돌지 않는다."""
+    from pxr import UsdShade, UsdPhysics
+    mat = UsdShade.Material.Define(stage, path)
+    pm = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
+    pm.CreateStaticFrictionAttr(float(static_f))
+    pm.CreateDynamicFrictionAttr(float(dynamic_f))
+    pm.CreateRestitutionAttr(0.0)
+    return mat
+
+
+def _bind_physics_material(prim, mat):
+    from pxr import UsdShade
+    UsdShade.MaterialBindingAPI.Apply(prim)
+    UsdShade.MaterialBindingAPI(prim).Bind(
+        mat, bindingStrength=UsdShade.Tokens.weakerThanDescendants,
+        materialPurpose="physics")
 
 
 def write_collision_usdc(out_path, obstacle_pts, obstacle_faces,
                          floor_meshes, levels, floor_shape, approx,
-                         spawn=None):
+                         spawn=None, friction=0.9):
     from pxr import Usd, UsdGeom, Sdf, Gf
 
     stage = Usd.Stage.CreateNew(out_path)           # .usdc → crate 자동
@@ -302,29 +330,43 @@ def write_collision_usdc(out_path, obstacle_pts, obstacle_faces,
     root = UsdGeom.Xform.Define(stage, "/Colliders")
     stage.SetDefaultPrim(root.GetPrim())
 
-    # 권장 로봇 스폰 지점 (열린 바닥) — teleop_test.py가 읽는다
+    # 권장 로봇 스폰 지점/방향 (열린 바닥, 복도 방향) — teleop_test.py가 읽는다
     if spawn is not None:
         root.GetPrim().CreateAttribute(
             "usd2usdz:spawnPoint", Sdf.ValueTypeNames.Double3
-        ).Set(Gf.Vec3d(*spawn))
+        ).Set(Gf.Vec3d(spawn[0], spawn[1], spawn[2]))
+        if len(spawn) > 3:
+            root.GetPrim().CreateAttribute(
+                "usd2usdz:spawnYaw", Sdf.ValueTypeNames.Double
+            ).Set(float(spawn[3]))
+
+    # 마찰 물성 (바퀴 슬립 방지)
+    mat = _make_physics_material(stage, "/Colliders/PhysicsMaterial",
+                                 static_f=friction, dynamic_f=friction * 0.9)
+    collider_prims = []
 
     # 벽/계단/나무/울타리 등 장애물 (원본 형상 유지, approximation=none)
-    _author_mesh(stage, "/Colliders/Obstacles",
-                 obstacle_pts, obstacle_faces, approx)
+    collider_prims.append(_author_mesh(stage, "/Colliders/Obstacles",
+                          obstacle_pts, obstacle_faces, approx))
 
     # 레벨별 바닥 collider
     #   slab : footprint bbox를 덮는 구멍 없는 박스 (로봇 추락 방지, 기본값)
     #   mesh : 바닥면을 level_z로 스냅한 메쉬 (footprint·구멍 그대로 보존)
     if floor_shape == "slab":
         for i, l in enumerate(levels):
-            _author_floor_slab(stage, f"/Colliders/Floor_{i}", l)
+            collider_prims.append(
+                _author_floor_slab(stage, f"/Colliders/Floor_{i}", l))
     else:
         for i, (pts, faces, _z) in enumerate(floor_meshes):
-            _author_mesh(stage, f"/Colliders/Floor_{i}", pts, faces, approx)
+            collider_prims.append(
+                _author_mesh(stage, f"/Colliders/Floor_{i}", pts, faces, approx))
+
+    for prim in collider_prims:
+        _bind_physics_material(prim, mat)
 
     stage.GetRootLayer().Save()
     print(f"[write_collision_usdc] 저장: {out_path} "
-          f"(장애물 1 + 바닥 {len(levels)} [{floor_shape}])")
+          f"(장애물 1 + 바닥 {len(levels)} [{floor_shape}], 마찰 {friction})")
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +433,11 @@ def main():
     ap.add_argument("--floor-shape", choices=["slab", "mesh"], default="slab",
                     help="slab: 구멍 없는 박스 바닥(추락 방지, 기본) / "
                          "mesh: 바닥 footprint·구멍 그대로 보존")
+    ap.add_argument("--friction", type=float, default=0.9,
+                    help="바닥/벽 collider 정지마찰 계수 (바퀴 슬립 방지)")
+    ap.add_argument("--floor-angle", type=float, default=60.0,
+                    help="바닥으로 간주해 제거할 면의 최대 기울기(도). 크게 하면 "
+                         "기울어진 바닥 범프까지 제거(벽은 보존), 작으면 수평면만")
     ap.add_argument("--rotate-x", type=float, default=0.0,
                     help="환경 X축 회전(도). 데이터가 Z-up이므로 기본 0 "
                          "(회전 불필요). 다른 좌표계일 때만 사용.")
@@ -445,15 +492,19 @@ def main():
         thresh_frac=args.level_thresh, levels_z=levels_z,
         min_area=args.min_level_area)
     # C. 충돌 지오메트리 (장애물 메쉬 + 레벨별 평탄 바닥 메쉬)
+    #    제거 마스크: 밴드 내에서 기울기 ≤ floor_angle인 면(기울어진 범프 포함).
+    #    거의 수직인 벽은 보존되어 충돌이 유지된다.
+    floor_cos = math.cos(math.radians(args.floor_angle))
+    floor_face_mask = np.abs(normals[:, UP]) > floor_cos
     obstacle_pts, obstacle_faces, floor_meshes = build_collision_geometry(
-        points, faces, centroids, up_mask, levels)
+        points, faces, centroids, floor_face_mask, levels)
     spawn = compute_spawn(floor_meshes, obstacle_pts)
     print(f"[main] 권장 스폰 지점: {tuple(round(v, 2) for v in spawn)}")
 
     # D. 충돌 에셋
     write_collision_usdc(collision, obstacle_pts, obstacle_faces,
                          floor_meshes, levels, args.floor_shape, args.approx,
-                         spawn=spawn)
+                         spawn=spawn, friction=args.friction)
     # E. 최상위 씬
     write_robot_usda(robot, out_dir, nurec, mesh_obj, collision,
                      args.rotate_x, args.physics_scene)

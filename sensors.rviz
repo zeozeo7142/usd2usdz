@@ -1,0 +1,50 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: world
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 40
+      Cell Size: 1
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: LiDAR (point_cloud)
+      Enabled: true
+      Topic:
+        Value: /point_cloud
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+      Size (m): 0.03
+      Style: Points
+      Decay Time: 0.5
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz_default_plugins/Image
+      Name: Camera (rgb)
+      Enabled: true
+      Topic:
+        Value: /rgb
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 20
+      Pitch: 0.6
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0

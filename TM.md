@@ -1,8 +1,8 @@
 # PortalCam USD → Isaac Sim 5.1 변환 기술 문서
 
-**작성일**: 2026-06-05  
-**환경**: Ubuntu 24.04 / Python 3.12 / NVIDIA RTX A5000 / CUDA 13.0 (드라이버)  
-**최종 결과**: Isaac Sim 5.1에서 GS 스플래팅 + Mesh 동시 렌더링 성공
+**작성일**: 2026-06-05 (최종 갱신 2026-06-08)  
+**환경**: Ubuntu 24.04 / Python 3.12 / NVIDIA RTX A5000 ×4 / CUDA 13.0 (드라이버) / Isaac Sim 5.1.0 (Docker)  
+**최종 결과**: Isaac Sim 5.1에서 GS+Mesh 렌더링 → 로봇 보행용 평탄 충돌 환경 생성 → Jackal 휠로봇 WASD 텔레옵 주행 → PhysX LiDAR + RGB(GS) 카메라를 부착해 ROS2로 RViz2 시각화까지 성공
 
 ---
 
@@ -378,3 +378,216 @@ docker run --rm --gpus '"device=1"' \
     /usd2usdz/output/USDZ_ETRI1/260521_ERTI_1_gs.ply \
     --output_file /usd2usdz/output/USDZ_ETRI1/260521_ERTI_1_nurec.usdz
 ```
+
+---
+---
+
+# Part 2. 로봇 보행/주행 + 센서 시뮬레이션 (2026-06-08 추가)
+
+GS+Mesh 렌더링 성공 이후, **복원 메쉬가 울퉁불퉁해 로봇 보행이 불가능**한 문제를 해결하고,
+실제로 휠로봇을 주행시키고 LiDAR/카메라 센서 데이터를 RViz2에서 확인하기까지의 작업 기록.
+
+---
+
+## 9. 로봇 보행용 충돌 환경 생성 (make_collision_env.py)
+
+### 9-1. 배경 / 핵심 원리
+
+**이유**: GS+스캔 메쉬를 Isaac Sim에 올렸으나 복원 메쉬 표면 노이즈가 심해, Jackal(휠) / RBQ10(사족)이
+바닥에서 튀거나 걸려 주행/보행 불가.
+
+**핵심 원리**: 물리 시뮬레이션에서 로봇이 밟고 부딪히는 것은 *시각 메쉬*가 아니라 *충돌 지오메트리(collision geometry)*다.
+→ 울퉁불퉁한 비주얼(GS + 스캔 메쉬)은 **그대로 두고**, 로봇이 상호작용하는 충돌 레이어만 깨끗하게 분리한다.
+(사용자 결정: 충돌 범위 = 바닥 + 벽/장애물, 방식 = 평면 collision 분리, 추가 패키지 없이 numpy + usd-core만)
+
+### 9-2. 구현 — 성공
+
+**작업**: `make_collision_env.py` 신규 작성. 입력 OBJ(Y-up)에서 평탄 바닥 collider + 벽/장애물 collider를 분리 생성.
+주요 함수:
+- `parse_obj()` — `v` / `f v/vt/vn` 방어적 파싱, >3각형 fan triangulate
+- `detect_levels()` — 면 법선이 수직축을 향하는(up-facing) 삼각형의 중심 높이를 면적가중 히스토그램 → 바닥 평면 검출
+- `build_collision_geometry()` — 바닥면/벽면 분리, 정점 압축
+- `compute_spawn()` — 바닥의 열린 지점(장애물 없는 곳) + PCA로 yaw 산출 → 로봇 스폰 지점/방향 결정
+- `write_collision_usdc()` — 평평한 슬랩(slab) 바닥 + 벽 메쉬 collider, 마찰 머티리얼, `spawnPoint`/`spawnYaw` 커스텀 속성 저작
+
+**산출물**: `260521_ERTI_1_collision.usdc`(충돌 전용) + `260521_ERTI_1_robot.usda`(Isaac 로드용 최상위 씬).
+
+**CLI**:
+```bash
+python make_collision_env.py --index 1 \
+  --levels {auto,dominant,lowest} \
+  --floor-shape {slab,mesh} \
+  --friction 0.9 --floor-angle 60
+```
+
+**층/씬별 전략 (사용자 설명 반영)**:
+| 인덱스 | 데이터 | 전략 |
+|--------|--------|------|
+| ETRI1 | 건물 실내 한 개 층 | 단일 평면 바닥(slab) |
+| ETRI2 | 실내 2층→1층(뚫린 부분/계단) + 1층 실외 | 층별 평면 + 메쉬 계단 |
+| ETRI3 | 실외(계단/울타리/나무 다수) | 지배적 지면만 평탄화 |
+
+**결과**: 평탄 슬랩 바닥 + 벽 collider 생성 성공. 로봇이 평면 위에 안착, 벽에 막힘.
+
+### 9-3. 좌표축(up-axis) 문제 — 수정
+
+**이유(증상)**: 생성한 `_robot.usda`를 Isaac Sim에서 열면 "축이 돌아가 있음"(로봇이 옆으로 누움).
+
+**원인 분석**: Part 1에서는 비주얼 정렬만 보고 `rotateX=90`을 가정했으나, **실제 PortalCam 데이터는 Z-up**이었다.
+무조건 회전을 넣으면 물리 중력(-Z)과 바닥이 어긋난다.
+
+**작업**: `make_collision_env.py`에 up-axis 자동 감지(데이터 분포로 판정)를 넣어 불필요한 회전 제거.
+
+**결과**: 바닥이 수평(중력과 정렬)으로 로드됨. 로봇이 바로 섬.
+
+### 9-4. 잔여 노이즈 (자갈) — 수용
+
+**증상**: 슬랩 바닥에도 일부 작은 돌출(자갈 같은 것)이 남아 Jackal이 밟고 넘어지는 경우 존재.
+**결과**: slab floor로 대부분 해소. 미세 잔여물은 실용상 허용(사용자 합의).
+
+---
+
+## 10. Jackal 휠로봇 WASD 텔레옵 검증 (teleop_test.py)
+
+### 10-1. 구현 — 성공
+
+**이유**: 생성한 평탄 바닥이 실제로 로봇 주행에 적합한지 사람이 직접 조종해 검증.
+**작업**: `teleop_test.py` 작성 — 키보드 WASD 텔레옵. Jackal 기본, 로봇별 프리셋(검증된 USD 경로/조인트명).
+기본 로봇 `/Isaac/Robots/Clearpath/Jackal/jackal.usd`.
+**결과**: GPU 헤드리스 + GUI에서 주행 검증. 1.5m 이상 직진 확인.
+
+### 10-2. 주행 이상 (느림 / 후진이 더 빠름 / 들썩임) — 수정
+
+**증상**: 전진이 느리고 잘 안 움직임, 후진이 전진보다 빠름, 후진키 떼면 넘어질 듯 들썩.
+**원인 분석**:
+1. 루프 안에서 `sim_app.update()`를 호출해 **이중 스텝**(double-step) 발생 → 물리 불안정.
+2. 휠 드라이브 게인 미설정.
+**작업**:
+- 루프의 `sim_app.update()` 제거 (`world.step(render=True)`만 사용).
+- `UsdPhysics.DriveAPI`(angular)로 휠 드라이브 설정: stiffness=0, damping=1e3, maxForce=2e3.
+- 4륜 차동 구동: `vels = (lin + side*(ang*WHEEL_BASE/2))/WHEEL_R`, `WHEEL_R=0.098, WHEEL_BASE=0.37`.
+**결과**: 정상 주행. 4륜(Jackal)도 문제없이 구동.
+
+---
+
+## 11. LiDAR / 카메라 센서 + ROS2 → RViz2 (sensor_drive.py)
+
+가장 길고 디버깅이 많았던 작업. 목표: Jackal에 **Ouster급 LiDAR + RGB 카메라**를 달고 RViz2에서 센싱 확인.
+단, **카메라에는 회색 복원 메쉬가 아니라 포토리얼 GS가 찍혀야** 함.
+
+### 11-1. 센서 종류 선택 — RTX LiDAR → PhysX LiDAR로 전환
+
+**이유**: 처음엔 RTX LiDAR(Ouster OS 프리셋)를 시도.
+**핵심 발견(중요)**:
+- **RTX LiDAR/카메라는 렌더링 visibility를 공유**한다. RTX LiDAR는 *보이는 메쉬*를 센싱.
+- GS(NuRec)는 **헤드리스 오프스크린 render product에는 렌더되지 않고**, 인터랙티브 GUI 뷰포트에서만 렌더됨.
+- 카메라에 GS만 찍으려면 VisualMesh를 숨겨야 하는데, 그러면 RTX LiDAR도 그 메쉬를 못 봐서 포인트가 사라짐 → visibility/투명도로 둘을 분리 불가.
+**작업/결과**: → **PhysX LiDAR(`RotatingLidarPhysX`)로 전환**. PhysX는 *물리 충돌 지오메트리*를 레이캐스트하므로
+렌더링 visibility와 무관 → VisualMesh를 숨겨도(카메라=GS) LiDAR는 collider를 그대로 센싱. (사용자 승인: "PhysX 라이다로 전환")
+
+> 결론: 지금 부착된 것은 **실제 RTX Ouster가 아니라, PhysX LiDAR를 Ouster급(360°×수직30°, ~27k pts)으로 설정**한 것.
+> 실제 Ouster OS1-128 사양은 `--lidar-vfov 45 --lidar-vres 0.35 --lidar-hres 0.35 --lidar-range 120`로 근사 가능(레이 수 많아 무거움).
+
+### 11-2. 카메라에 GS 보이기 — VisualMesh invisible
+
+**이유**: 카메라 영상에 회색 복원 메쉬가 GS 위에 겹쳐 보이는 문제.
+**실패한 시도(기록)**:
+- VisualMesh에 `displayOpacity=0` → 머티리얼이 없어 무효.
+- 투명 `UsdPreviewSurface` 머티리얼 부여 → 헤드리스(path-traced)에선 투명, **RTX Real-Time GUI에선 불투명 렌더**(효과 없음). (이 부분을 한때 "투명 적용됨"으로 잘못 보고함 — 사용자 지적으로 정정.)
+**작업(성공)**: `UsdGeom.Imageable(VisualMesh).MakeInvisible()`로 VisualMesh를 **완전히 숨김**.
+**결과**: GUI 뷰포트에서 GS만 켜면 카메라(render product)에 GS가 찍힘(사용자가 캡처로 확인). PhysX LiDAR는 영향 없음.
+- 참고: VisualMesh 뷰 OFF 시 RViz에 포인트클라우드가 남아 보였던 것은 **이전 프레임의 잔상(decay 잔여)**일 뿐, 실제 LiDAR는 0이었음(사용자 확인).
+
+### 11-3. PhysX LiDAR가 0 포인트 — 로딩 방식 수정
+
+**증상**: `open_stage(_robot.usda)`로 환경을 열면 PhysX LiDAR가 0 포인트.
+**원인 분석**: `open_stage` 경로의 환경 내 physicsScene이 LiDAR 레이 쿼리를 방해.
+**작업**: `World(stage_units_in_meters=1.0)` 생성 후 `add_reference_to_stage(env, "/World/Scene")`로 환경을 **레퍼런스로 로드**.
+**결과**: collider 정상 레이캐스트, 1320 포인트 확인 → 이후 Ouster급 설정으로 ~27900까지.
+
+### 11-4. 센서가 공간에 고정됨 — 마운트 위치 수정
+
+**증상**: 로봇이 움직여도 센서가 스폰 위치에 고정.
+**원인**: 센서를 아티큘레이션 루트 prim(`/World/Jackal`, 스폰 위치에서 안 움직임) 밑에 마운트.
+**작업**: **움직이는 링크인 `/World/Jackal/base_link` 밑**에 LiDAR/카메라 마운트.
+**결과**: 센서가 로봇과 함께 이동.
+
+### 11-5. ROS2 토픽은 뜨는데 데이터가 안 건너옴 — FastDDS 전송 수정 (핵심)
+
+**증상**: `ros2 topic list`엔 토픽이 보이는데 RViz/listener에 **데이터가 안 옴**. `/clock`, `/tf` 비어 있음.
+**원인 분석**: Isaac 번들 FastDDS와 osrf humble FastDDS의 **공유메모리(SHM) 전송 버전 불일치** → 컨테이너 간 데이터 전달 실패.
+**작업**:
+- `fastdds_udp.xml` 작성 — **UDPv4 전용** 프로파일(`<useBuiltinTransports>false</useBuiltinTransports>`).
+- 양쪽 컨테이너 모두 `--ipc=host` + `-e FASTRTPS_DEFAULT_PROFILES_FILE=.../fastdds_udp.xml`.
+- Isaac 실행 스크립트(`run-isaac-sim-5.1.sh`)에 `--ipc=host` 추가.
+**결과**: talker/listener로 컨테이너 간 통신 확인. 토픽 데이터 정상 수신.
+
+### 11-6. OmniGraph ROS2 퍼블리셔가 standalone에서 발행 안 됨 — rclpy 직접 발행
+
+**증상**: OmniGraph ROS2 퍼블리셔 노드가 standalone 스크립트에서 메시지를 안 내보냄.
+**작업**: **rclpy 직접 퍼블리시**로 재작성. `/clock`(Clock), `/tf`(TFMessage), `/point_cloud`(PointCloud2), `/rgb`(Image)를 매 스텝 직접 publish.
+- `make_pc2()` — x/y/z FLOAT32, point_step 12, 비유한값 필터
+- `make_img()` — rgb8
+- `tf_msg()` — 쿼터니언 [w,x,y,z] → geometry_msgs [x,y,z,w]
+**결과**: RViz에 LiDAR/카메라/TF 정상 표시.
+
+### 11-7. 포인트클라우드가 1/4씩 4번에 걸쳐 보임 — RViz Decay Time
+
+**증상**: RViz에서 포인트클라우드가 한 번에 전체가 아니라 1/4씩 나눠 깜빡이며 채워짐.
+**원인 분석**: PhysX LiDAR는 **회전형**이라 매 프레임이 회전의 일부(부분 스윕). 버퍼가 프레임마다 부분/전체로 바뀜
+(폭 1320 ↔ 27900 교대 관찰). "전체 스윕일 때만 publish"하는 코드측 필터(`npc >= 0.5*max_pts`)는 깔끔히 안 걸러짐.
+**작업(최종 해법)**: 코드는 **매 프레임 publish**로 단순화하고, **RViz `sensors.rviz`의 PointCloud2 `Decay Time: 0.5`** 설정.
+→ 회전 스윕이 0.5초간 누적돼 항상 전체 클라우드로 보임(회전 LiDAR 시각화의 정석).
+**결과**: 깜빡임 해소. RViz 재시작(`./run-rviz.sh`)으로 새 설정 적용.
+
+### 11-8. GPU 검증 운영
+
+**작업**: 빈 GPU(0)에 `--rm` 헤드리스 Isaac 컨테이너로 RTX/PhysX 센서 실제 검증.
+**결과**: 검증 후 **임시 probe 파일 정리 + GPU 반납**(16 MiB) — 사용자 표준 지침(검증 후 GPU 비우기) 준수.
+
+---
+
+## 12. Part 2 핵심 기술 발견사항
+
+- **RTX vs PhysX 센서**: RTX LiDAR/카메라는 렌더 visibility(보이는 메쉬)를 센싱하고 서로 공유한다. PhysX LiDAR는 물리 collider를 레이캐스트해 visibility와 무관. → "카메라=GS, LiDAR=collider"처럼 둘을 분리하려면 PhysX LiDAR가 답.
+- **GS(NuRec) 렌더 범위**: 인터랙티브 GUI 뷰포트에서만 렌더. 헤드리스 오프스크린 render product에는 안 나옴(검은 화면). 카메라로 GS를 얻으려면 GUI 세션 + 오프스크린 render product 조합.
+- **VisualMesh 투명화 불가**: 투명 머티리얼은 RTX Real-Time에서 불투명 렌더됨. 숨기려면 `MakeInvisible()`(visibility=invisible)이 확실.
+- **PhysX LiDAR 로딩**: `open_stage(env)`의 내장 physicsScene이 레이 쿼리를 막음. `World()` + `add_reference_to_stage()`로 로드해야 collider를 레이캐스트.
+- **센서 마운트**: 아티큘레이션 루트 prim은 스폰 위치에 고정. 반드시 `base_link`(움직이는 링크) 밑에 마운트.
+- **이중 스텝 금지**: standalone 루프에서 `sim_app.update()`와 `world.step()`을 같이 부르면 물리 불안정. `world.step(render=True)`만 사용.
+- **컨테이너 간 ROS2(DDS)**: Isaac 번들 FastDDS ↔ osrf humble 간 SHM 버전 불일치로 데이터 전달 실패. **UDP 전용 프로파일 + 양쪽 `--ipc=host`**로 해결.
+- **OmniGraph ROS2 퍼블리셔**는 standalone python 스크립트에서 발행 안 될 수 있음 → **rclpy 직접 발행**이 안정적.
+- **회전 LiDAR 시각화**: 매 프레임은 부분 스윕. RViz `Decay Time`을 한 회전 주기(~0.5s)로 두면 전체 스윕이 누적돼 보인다.
+- **up-axis**: PortalCam 데이터는 **Z-up**. 무조건 `rotateX=90`을 넣으면 물리에서 바닥이 어긋남 → 데이터 분포로 자동 감지.
+
+---
+
+## 13. Part 2 파일 구조 / 스크립트
+
+| 파일 | 내용 |
+|------|------|
+| `make_collision_env.py` | OBJ → 평탄 충돌 환경 생성. `_collision.usdc`(충돌) + `_robot.usda`(로드용). slab 바닥/벽 collider, 마찰, spawnPoint/spawnYaw |
+| `teleop_test.py` | WASD 키보드 텔레옵. Jackal 기본 + 로봇 프리셋 |
+| `sensor_drive.py` | 센서+ROS2 통합. PhysX LiDAR(Ouster급) + RGB(GS) 카메라, World()+reference 로딩, VisualMesh invisible, rclpy 직접 발행, UDP 프로파일 |
+| `fastdds_udp.xml` | UDP 전용 FastDDS 프로파일 (컨테이너 간 DDS 데이터 전달 필수) |
+| `run-rviz.sh` | osrf/ros:humble-desktop 컨테이너로 RViz2 실행 (`--network=host --ipc=host`, UDP 프로파일) |
+| `sensors.rviz` | RViz 설정. PointCloud2(/point_cloud, Best Effort, **Decay Time 0.5**), Image(/rgb), TF, Grid |
+
+### sensor_drive.py 주요 상수
+```python
+ROBOT_PRIM="/World/Jackal"; BASE_LINK=ROBOT_PRIM+"/base_link"
+SCENE_PRIM="/World/Scene"; VISUALMESH=SCENE_PRIM+"/Environment/VisualMesh"
+LIDAR_OFFSET=(0,0,0.3); CAM_OFFSET=(0.2,0,0.25)
+WHEEL_R=0.098; WHEEL_BASE=0.37
+ROBOT_PATH="/Isaac/Robots/Clearpath/Jackal/jackal.usd"
+# CLI: --index --lidar-vfov 30 --lidar-hres 0.4 --lidar-vres 1.0 --lidar-range 100 --headless --max-steps --show-visualmesh
+```
+
+### 실행 순서
+```bash
+# 1) Isaac (GUI) — 표준 env로 센서 스크립트 실행
+/isaac-sim/python.sh /home/zeozeo/git/usd2usdz/sensor_drive.py --index 1
+# 2) 별도 터미널 — RViz2 (UDP 프로파일 + ipc=host)
+./run-rviz.sh
+```
+RViz Fixed Frame은 `world`(필요시 `lidar`). PointCloud2/Image는 Best Effort QoS.
