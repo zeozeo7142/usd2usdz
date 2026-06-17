@@ -23,18 +23,21 @@ RViz: 호스트에서 ./run-rviz.sh  (Fixed Frame: world)
 """
 import argparse
 import sys
+import time
 
 parser = argparse.ArgumentParser(description="Jackal + PhysX LiDAR + GS Camera → ROS2/RViz")
 parser.add_argument("--index", type=int, choices=[1, 2, 3])
 parser.add_argument("--env", default=None)
 parser.add_argument("--robot-usd", default=None)
-parser.add_argument("--lin-speed", type=float, default=1.5)
+parser.add_argument("--lin-speed", type=float, default=2.0)
 parser.add_argument("--ang-speed", type=float, default=2.0)
 parser.add_argument("--ros-distro", default="humble")
 parser.add_argument("--cam-w", type=int, default=640)
 parser.add_argument("--cam-h", type=int, default=480)
+parser.add_argument("--cam-skip", type=int, default=4,
+                    help="카메라 RGB를 N스텝마다 1회만 읽어 발행(GPU 읽기 부하↓). 1=매 프레임")
 parser.add_argument("--lidar-vfov", type=float, default=30.0, help="라이다 수직 FOV(도)")
-parser.add_argument("--lidar-hres", type=float, default=0.4, help="수평 해상도(도/샘플)")
+parser.add_argument("--lidar-hres", type=float, default=0.8, help="수평 해상도(도/샘플). 작을수록 조밀+무거움")
 parser.add_argument("--lidar-vres", type=float, default=1.0, help="수직 해상도(도/채널)")
 parser.add_argument("--lidar-range", type=float, default=100.0, help="최대 거리(m)")
 parser.add_argument("--show-visualmesh", action="store_true",
@@ -121,7 +124,7 @@ def detect_spawn(coll):
     return np.array([float(sp[0]), float(sp[1]), float(sp[2])]), yaw
 
 
-def set_wheel_drive(stage, damping=1.0e3, max_force=2.0e3):
+def set_wheel_drive(stage, damping=1.0e3, max_force=5.0e3):
     from pxr import UsdPhysics
     for p in Usd.PrimRange(stage.GetPrimAtPath(ROBOT_PRIM)):
         if p.GetName() in WHEELS:
@@ -289,6 +292,8 @@ def main():
         return lin, ang
 
     step = 0
+    t_wall0 = time.time()          # RTF(실시간 배율) 측정용 기준점
+    t_sim0 = world.current_time
     while sim_app.is_running() and not quit_f["v"]:
         lin, ang = command()
         vels = (lin + side * (ang * WHEEL_BASE / 2.0)) / WHEEL_R
@@ -317,18 +322,26 @@ def main():
             if npc:
                 pc_pub.publish(make_pc2(stamp, "lidar", arr))
 
-        try:
-            img = rgb_annot.get_data()
-            if img is not None and np.asarray(img).size:
-                img_pub.publish(make_img(stamp, "camera", img))
-        except Exception:  # noqa: BLE001
-            pass
+        # 카메라 RGB 읽기(GPU→CPU)는 무거우므로 N스텝마다 1회만 수행 → RTF↑
+        if step % args.cam_skip == 0:
+            try:
+                img = rgb_annot.get_data()
+                if img is not None and np.asarray(img).size:
+                    img_pub.publish(make_img(stamp, "camera", img))
+            except Exception:  # noqa: BLE001
+                pass
 
         rclpy.spin_once(node, timeout_sec=0.0)
         step += 1
         if step % 60 == 0:
+            dt_wall = time.time() - t_wall0
+            dt_sim = world.current_time - t_sim0
+            rtf = dt_sim / dt_wall if dt_wall > 0 else 0.0
+            fps = step / dt_wall if dt_wall > 0 else 0.0
             print(f"[sensor] step={step} playing={world.is_playing()} "
-                  f"pos=({pos[0]:.1f},{pos[1]:.1f}) lidar_pts={npc}")
+                  f"pos=({pos[0]:.1f},{pos[1]:.1f}) lidar_pts={npc} "
+                  f"RTF={rtf:.2f} (sim {fps:.1f} fps) "
+                  f"← RTF<1이면 그만큼 느리게 보임")
         if args.headless and step > args.max_steps:
             break
 

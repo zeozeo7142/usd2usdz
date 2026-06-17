@@ -252,12 +252,14 @@
   > **양쪽 컨테이너 모두** `--ipc=host` + `FASTRTPS_DEFAULT_PROFILES_FILE=.../fastdds_udp.xml` 필요.
   > (`run-isaac-sim-5.1.sh`, `run-rviz.sh` 둘 다 적용됨)
 
-- [x] **9-3.** Isaac Sim(GUI) 컨테이너에서 센서 스크립트 실행
+- [x] **9-3.** Isaac Sim(GUI) 컨테이너에서 센서 스크립트 실행 — **런처 사용**
   ```bash
-  export FASTRTPS_DEFAULT_PROFILES_FILE=/home/zeozeo/git/usd2usdz/fastdds_udp.xml
-  /isaac-sim/python.sh /home/zeozeo/git/usd2usdz/sensor_drive.py --index 1
+  # 런처가 ROS2 env 4종을 자동 설정하고 인자를 그대로 전달
+  /home/zeozeo/git/usd2usdz/run-sensor-drive.sh --index 1
   # 발행 토픽: /clock /tf /point_cloud(PointCloud2) /rgb(Image)
+  # 조작: W/S 전후, A/D 회전, ESC 종료
   ```
+  > ⚠️ 이 런처는 `/isaac-sim/python.sh`를 쓰므로 **Isaac Sim 5.1 컨테이너 셸 안에서** 실행한다.
   > ⚠️ GS는 GUI 뷰포트에서만 렌더된다(헤드리스 render product에는 검게 나옴).
   > 카메라에 GS를 담으려면 GUI 세션에서 실행하고, 뷰포트에서 VisualMesh/Colliders는 끄고 GS만 켜 둔다.
 
@@ -276,8 +278,21 @@
   | /rgb | 카메라 영상이 **포토리얼 GS**(회색 메쉬 아님) |
   | QoS | PointCloud2/Image 모두 **Best Effort** |
 
-  > 실제 Ouster OS1-128 사양 근사: `--lidar-vfov 45 --lidar-vres 0.35 --lidar-hres 0.35 --lidar-range 120`
-  > (레이 수가 많아 무거움. 기본값 `--lidar-vfov 30 --lidar-vres 1.0 --lidar-hres 0.4`는 ~27k pts로 가벼움)
+- [x] **9-6.** 주행이 느릴 때 — RTF(실시간 배율) 확인 후 부하 조절
+  ```bash
+  # 실행한 터미널 콘솔에 60스텝마다 출력됨:
+  #   [sensor] step=120 ... lidar_pts=13500 RTF=0.38 (sim 22 fps)
+  # RTF<1이면 그만큼 느리게 보임 (구동 문제 아님 = 렌더/센서 부하)
+  ```
+  | RTF | 의미 | 조치 |
+  |-----|------|------|
+  | ~1.0 | 실시간 정상 | OK |
+  | 0.2~0.5 | 느린 슬로모션 | 기본값(`--lidar-hres 0.8`, 13,500레이)이 균형점 |
+  | <0.1 | 매우 느림 | LiDAR 더 가볍게: `--lidar-hres 1.2 --lidar-vres 1.5` |
+
+  > LiDAR 레이캐스트가 RTF 최대 병목(레이당 ~7.7µs). GS 렌더가 RTF ~0.2 바닥을 깖.
+  > 기본값: `--lin-speed 2.0 --ang-speed 2.0 --lidar-hres 0.8 --lidar-vres 1.0 --cam-skip 4`
+  > 더 조밀(느림): `--lidar-hres 0.4` (27,900 pts) / Ouster OS1-128 근사: `--lidar-vfov 45 --lidar-vres 0.35 --lidar-hres 0.35 --lidar-range 120`
 
 ---
 
@@ -293,7 +308,7 @@ output/USDZ_ETRI1/
 
 # 프로젝트 루트 (로봇/센서 도구)
 make_collision_env.py   teleop_test.py   sensor_drive.py
-fastdds_udp.xml   run-rviz.sh   sensors.rviz
+run-sensor-drive.sh   fastdds_udp.xml   run-rviz.sh   sensors.rviz
 ```
 
 ---

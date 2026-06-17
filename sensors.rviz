@@ -44,6 +44,7 @@ Visualization Manager:
       Name: Current View
       Distance: 20
       Pitch: 0.6
+      Target Frame: base_link
       Focal Point:
         X: 0
         Y: 0

@@ -545,6 +545,50 @@ python make_collision_env.py --index 1 \
 **작업**: 빈 GPU(0)에 `--rm` 헤드리스 Isaac 컨테이너로 RTX/PhysX 센서 실제 검증.
 **결과**: 검증 후 **임시 probe 파일 정리 + GPU 반납**(16 MiB) — 사용자 표준 지침(검증 후 GPU 비우기) 준수.
 
+### 11-9. 주행이 너무 느림 — RTF(실시간 배율) 병목 진단 및 튜닝 — 성공
+
+**증상**: Jackal이 전·후진·회전 *모두* 기어가듯 느림. 처음엔 구동 토크 문제로 의심.
+
+**작업/진단**:
+- 루프에 **RTF 측정 로그** 추가: `t_wall0=time.time()`, `t_sim0=world.current_time` 기준으로
+  `RTF = (current_time - t_sim0)/(wall - t_wall0)`, sim fps도 함께 출력(60스텝마다).
+- LiDAR 해상도를 바꿔가며 실측:
+
+  | LiDAR 레이 수 | RTF | sim fps |
+  |--------------|-----|---------|
+  | 27,900 (hres 0.4 × vres 1.0) | **0.06** | 3.4 |
+  | 1,440 (hres 2.0 × vres 4.0) | **0.21** | 12.8 |
+
+**결과(원인 확정)**:
+- 구동 문제 아님. **시뮬레이션이 실시간의 6~21%로 느리게 돌아** 슬로모션처럼 보인 것(로봇은 sim 기준 2 m/s로 정상 주행).
+- **PhysX LiDAR 레이캐스트가 최대 병목** (레이 1개당 ~7.7µs CPU). 27,900개면 한 스텝에 ~216ms.
+- 단, 1,440개에서도 RTF 0.21에 그침 → **GS(NuRec) 렌더가 RTF ~0.2의 바닥**을 깔고 있음(레이를 더 줄여도 그 아래로 안 내려감).
+
+**튜닝(반영)**:
+- LiDAR 기본 해상도를 **균형값**으로: `--lidar-hres 0.4 → 0.8` (450×30 = 13,500 레이, RTF≈0.35~0.4 예상). 수직 30채널 유지.
+- 카메라 RGB 읽기(GPU→CPU)는 무거워 **`--cam-skip 4`**(N스텝당 1회만 `get_data`+발행) 추가.
+- 명령 속도 `--lin-speed 1.5→2.0`, 휠 드라이브 `max_force 2e3→5e3`(가속 개선).
+
+### 11-10. "직진+회전이 직진만보다 빠른" 느낌 — 설명(구동 정상) + 회전속도 하향
+
+**증상**: 직진만/후진만보다 직진+회전/후진+회전이 더 빠르게 *느껴짐*.
+**원인 분석**: 구동 공식은 정상 차동구동(`vels=(lin ± ang*WHEEL_BASE/2)/WHEEL_R`)으로 전진 속도는 동일.
+빠르게 느껴지는 이유는 (1) 회전 시 시야가 돌아 광학 흐름이 커서(특히 저RTF 슬로모션), (2) Jackal이 스키드-스티어(4륜 고정)라 제자리 회전 시 측면 슬립으로 약간의 전진 럴치 발생.
+**작업/결과**: `--ang-speed 3.0→2.0`(172°/s→115°/s)으로 낮춰 회전 지배 완화. 구동 자체는 정상이므로 코드 수정 없음.
+
+### 11-11. 실행 런처 스크립트 — 성공
+
+**이유**: ROS2 환경변수 4종 + `python.sh` 호출이 길어 매번 입력 번거로움.
+**작업**: `run-sensor-drive.sh` 작성(컨테이너 *안에서* 실행). 환경변수 export 후 `exec /isaac-sim/python.sh sensor_drive.py "$@"`로 **인자 그대로 전달**. 인자 없으면 `--index 1` 기본.
+**결과**: `./run-sensor-drive.sh [옵션]`으로 한 번에 실행.
+
+### 11-12. RViz 로봇 추적(Views Target Frame) — 실패 (미해결)
+
+**이유**: 로봇이 멀리(`y≈-15m`) 주행하면 RViz 기본 시점(원점)을 벗어나 포인트클라우드가 화면 밖으로 나감. 시점이 로봇을 따라가게 하려 함.
+**작업**: `sensors.rviz`의 `Views/Current`에 `Target Frame: base_link` 추가(Fixed Frame은 `world` 유지 의도).
+**결과**: **실패**. 시점 추적이 안 되고, 포인트클라우드가 아예 안 보임. (캡처상 Global Options의 Fixed Frame이 `lidar`로 바뀌어 있기도 함 → Fixed Frame / Target Frame / 발행 frame_id(`lidar`)와 TF 타임스탬프(저RTF로 stale) 간 정합 문제로 추정)
+→ **다음 전략**: (1) Fixed Frame을 `world`로 되돌리고 Target Frame만 `base_link` 유지하되, TF가 메시지 stamp와 맞는지 확인(Best Effort + 저RTF로 TF가 뒤처지면 포인트가 드롭됨). (2) 또는 Fixed Frame을 `base_link`로 두어 로봇 고정 시점 + 클라우드 항상 중앙. (3) `/tf`를 충분한 빈도로 최신 stamp로 발행하는지 점검. 미해결 상태로 다음 세션에서 재현/수정.
+
 ---
 
 ## 12. Part 2 핵심 기술 발견사항
@@ -559,6 +603,10 @@ python make_collision_env.py --index 1 \
 - **OmniGraph ROS2 퍼블리셔**는 standalone python 스크립트에서 발행 안 될 수 있음 → **rclpy 직접 발행**이 안정적.
 - **회전 LiDAR 시각화**: 매 프레임은 부분 스윕. RViz `Decay Time`을 한 회전 주기(~0.5s)로 두면 전체 스윕이 누적돼 보인다.
 - **up-axis**: PortalCam 데이터는 **Z-up**. 무조건 `rotateX=90`을 넣으면 물리에서 바닥이 어긋남 → 데이터 분포로 자동 감지.
+- **PhysX LiDAR가 RTF를 지배**: 레이캐스트는 CPU에서 레이당 ~7.7µs. 레이 수가 곧 비용 → 해상도가 주행 속도감(RTF)을 좌우. 27,900레이→RTF 0.06, 1,440레이→0.21. 시각화엔 13,500레이(hres 0.8) + Decay 0.5가 균형점.
+- **GS 렌더 RTF 바닥**: GS(NuRec) 뷰포트 렌더만으로 RTF ~0.2가 한계. 라이다를 0에 가깝게 줄여도 그 위로 안 올라감. 주행감을 실시간에 가깝게 하려면 GS를 끄거나 카메라 render product를 빼야 함.
+- **로봇이 느려 보이면 토크가 아니라 RTF부터 의심**: `RTF = Δsim_time / Δwall_time`를 찍어 확인. RTF≪1이면 렌더/센서 부하 문제(구동 무관).
+- **스키드-스티어 회전감**: Jackal은 4륜 고정 스키드-스티어 → 제자리 회전 시 측면 슬립. 회전이 전진보다 빠르게 *느껴지는* 건 정상(광학 흐름 + 슬립 럴치). `ang-speed`로 조절.
 
 ---
 
@@ -568,10 +616,11 @@ python make_collision_env.py --index 1 \
 |------|------|
 | `make_collision_env.py` | OBJ → 평탄 충돌 환경 생성. `_collision.usdc`(충돌) + `_robot.usda`(로드용). slab 바닥/벽 collider, 마찰, spawnPoint/spawnYaw |
 | `teleop_test.py` | WASD 키보드 텔레옵. Jackal 기본 + 로봇 프리셋 |
-| `sensor_drive.py` | 센서+ROS2 통합. PhysX LiDAR(Ouster급) + RGB(GS) 카메라, World()+reference 로딩, VisualMesh invisible, rclpy 직접 발행, UDP 프로파일 |
+| `sensor_drive.py` | 센서+ROS2 통합. PhysX LiDAR(Ouster급) + RGB(GS) 카메라, World()+reference 로딩, VisualMesh invisible, rclpy 직접 발행, UDP 프로파일, RTF 로그 + cam-skip |
+| `run-sensor-drive.sh` | sensor_drive.py 실행 런처(컨테이너 안). ROS2 env 4종 export + 인자 그대로 전달 |
 | `fastdds_udp.xml` | UDP 전용 FastDDS 프로파일 (컨테이너 간 DDS 데이터 전달 필수) |
 | `run-rviz.sh` | osrf/ros:humble-desktop 컨테이너로 RViz2 실행 (`--network=host --ipc=host`, UDP 프로파일) |
-| `sensors.rviz` | RViz 설정. PointCloud2(/point_cloud, Best Effort, **Decay Time 0.5**), Image(/rgb), TF, Grid |
+| `sensors.rviz` | RViz 설정. PointCloud2(/point_cloud, Best Effort, **Decay Time 0.5**), Image(/rgb), TF, Grid. Views Target Frame=base_link(추적 미해결, 11-12) |
 
 ### sensor_drive.py 주요 상수
 ```python
@@ -580,14 +629,17 @@ SCENE_PRIM="/World/Scene"; VISUALMESH=SCENE_PRIM+"/Environment/VisualMesh"
 LIDAR_OFFSET=(0,0,0.3); CAM_OFFSET=(0.2,0,0.25)
 WHEEL_R=0.098; WHEEL_BASE=0.37
 ROBOT_PATH="/Isaac/Robots/Clearpath/Jackal/jackal.usd"
-# CLI: --index --lidar-vfov 30 --lidar-hres 0.4 --lidar-vres 1.0 --lidar-range 100 --headless --max-steps --show-visualmesh
+# CLI 기본값: --lin-speed 2.0 --ang-speed 2.0 --lidar-vfov 30 --lidar-hres 0.8 --lidar-vres 1.0
+#            --lidar-range 100 --cam-skip 4 --cam-w 640 --cam-h 480 --headless --max-steps --show-visualmesh
+# 밀도/속도 조절: 조밀(느림) --lidar-hres 0.4(27,900레이) / 성김(빠름) --lidar-hres 1.2 --lidar-vres 1.5
 ```
 
 ### 실행 순서
 ```bash
-# 1) Isaac (GUI) — 표준 env로 센서 스크립트 실행
-/isaac-sim/python.sh /home/zeozeo/git/usd2usdz/sensor_drive.py --index 1
-# 2) 별도 터미널 — RViz2 (UDP 프로파일 + ipc=host)
+# 1) Isaac (GUI) 컨테이너 안 — 런처로 센서 스크립트 실행(ROS2 env 자동 설정)
+./run-sensor-drive.sh --index 1          # 옵션은 그대로 전달됨
+# 2) 별도 터미널(호스트) — RViz2 (UDP 프로파일 + ipc=host)
 ./run-rviz.sh
 ```
 RViz Fixed Frame은 `world`(필요시 `lidar`). PointCloud2/Image는 Best Effort QoS.
+※ 멀리 주행 시 로봇 추적(Views Target Frame=base_link)은 아직 미해결(11-12 참고).
