@@ -269,6 +269,7 @@
   # → sensors.rviz 로드: PointCloud2(/point_cloud), Image(/rgb), TF, Grid
   ```
   > ⚠️ 권한 오류 시: `chmod +x /home/zeozeo/git/usd2usdz/run-rviz.sh`
+  > 로봇이 멀리 주행해도 시점이 따라가도록 `Views/Current`의 **Target Frame=base_link**, Fixed Frame=world 유지(이미 sensors.rviz에 설정됨).
 
 - [x] **9-5.** 확인 항목
   | 항목 | 성공 기준 |

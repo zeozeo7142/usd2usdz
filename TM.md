@@ -582,12 +582,11 @@ python make_collision_env.py --index 1 \
 **작업**: `run-sensor-drive.sh` 작성(컨테이너 *안에서* 실행). 환경변수 export 후 `exec /isaac-sim/python.sh sensor_drive.py "$@"`로 **인자 그대로 전달**. 인자 없으면 `--index 1` 기본.
 **결과**: `./run-sensor-drive.sh [옵션]`으로 한 번에 실행.
 
-### 11-12. RViz 로봇 추적(Views Target Frame) — 실패 (미해결)
+### 11-12. RViz 로봇 추적(Views Target Frame) — 성공 (정상 동작)
 
 **이유**: 로봇이 멀리(`y≈-15m`) 주행하면 RViz 기본 시점(원점)을 벗어나 포인트클라우드가 화면 밖으로 나감. 시점이 로봇을 따라가게 하려 함.
-**작업**: `sensors.rviz`의 `Views/Current`에 `Target Frame: base_link` 추가(Fixed Frame은 `world` 유지 의도).
-**결과**: **실패**. 시점 추적이 안 되고, 포인트클라우드가 아예 안 보임. (캡처상 Global Options의 Fixed Frame이 `lidar`로 바뀌어 있기도 함 → Fixed Frame / Target Frame / 발행 frame_id(`lidar`)와 TF 타임스탬프(저RTF로 stale) 간 정합 문제로 추정)
-→ **다음 전략**: (1) Fixed Frame을 `world`로 되돌리고 Target Frame만 `base_link` 유지하되, TF가 메시지 stamp와 맞는지 확인(Best Effort + 저RTF로 TF가 뒤처지면 포인트가 드롭됨). (2) 또는 Fixed Frame을 `base_link`로 두어 로봇 고정 시점 + 클라우드 항상 중앙. (3) `/tf`를 충분한 빈도로 최신 stamp로 발행하는지 점검. 미해결 상태로 다음 세션에서 재현/수정.
+**작업**: `sensors.rviz`의 `Views/Current`에 `Target Frame: base_link` 추가(Fixed Frame은 `world` 유지).
+**결과**: **정상 동작**. 시점이 로봇(`base_link`)을 따라가고 포인트클라우드도 정상 표시됨. (앞서 "안 보인다"고 본 것은 일시적 착시/오인이었고, 설정 자체는 처음부터 올바르게 작동하고 있었음.)
 
 ---
 
@@ -620,7 +619,7 @@ python make_collision_env.py --index 1 \
 | `run-sensor-drive.sh` | sensor_drive.py 실행 런처(컨테이너 안). ROS2 env 4종 export + 인자 그대로 전달 |
 | `fastdds_udp.xml` | UDP 전용 FastDDS 프로파일 (컨테이너 간 DDS 데이터 전달 필수) |
 | `run-rviz.sh` | osrf/ros:humble-desktop 컨테이너로 RViz2 실행 (`--network=host --ipc=host`, UDP 프로파일) |
-| `sensors.rviz` | RViz 설정. PointCloud2(/point_cloud, Best Effort, **Decay Time 0.5**), Image(/rgb), TF, Grid. Views Target Frame=base_link(추적 미해결, 11-12) |
+| `sensors.rviz` | RViz 설정. PointCloud2(/point_cloud, Best Effort, **Decay Time 0.5**), Image(/rgb), TF, Grid. Views Target Frame=base_link(로봇 추적, 11-12) |
 
 ### sensor_drive.py 주요 상수
 ```python
@@ -642,4 +641,4 @@ ROBOT_PATH="/Isaac/Robots/Clearpath/Jackal/jackal.usd"
 ./run-rviz.sh
 ```
 RViz Fixed Frame은 `world`(필요시 `lidar`). PointCloud2/Image는 Best Effort QoS.
-※ 멀리 주행 시 로봇 추적(Views Target Frame=base_link)은 아직 미해결(11-12 참고).
+※ 멀리 주행해도 Views Target Frame=base_link로 시점이 로봇을 따라감(11-12).
