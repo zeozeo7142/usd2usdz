@@ -101,8 +101,13 @@
   ```bash
   cd ~/git/3dgrut
   docker build --build-arg CUDA_VERSION=12.8.1 -t 3dgrut:cuda128 .
-  # 소요 시간: ~30분 (CUDA 커널 컴파일 포함)
+  # 소요 시간: ~10~30분 (CUDA 커널 컴파일 포함, apt 캐시 시 단축)
   ```
+  > ⚠️ **라이선스**: 원본 Dockerfile은 Miniconda(Anaconda `defaults` 채널, ToS 적용)를 사용 →
+  > 대규모 기관 상업 사용 시 유료. **Miniforge로 교체**해 conda-forge(OSS)만 쓰도록 수정함.
+  > - `Dockerfile`: `Miniconda3...` → `Miniforge3-Linux-x86_64.sh`
+  > - `install_env.sh`: `conda create`/`conda install`에 `-c conda-forge` 명시
+  > 검증: `docker run --rm 3dgrut:cuda128 conda run -n 3dgrut conda list --show-channel-urls | grep -c defaults` → **0**이어야 함.
 
 - [x] **4-4.** PLY → NuRec USDZ 변환
   ```bash

@@ -13,6 +13,7 @@
 | 특허 조항 | 특허 소송 시 라이선스 종료 조항 존재 여부 |
 | 소스 공개 의무 | Copyleft(GPL 계열) 여부 |
 | 배포 제한 | 수정본 배포 시 동일 라이선스 적용 여부 |
+| **패키지 출처(채널/저장소)** | 어느 채널·저장소에서 받는지 (예: conda `defaults`=Anaconda ToS). 도구가 OSS여도 저장소 약관이 별도로 붙을 수 있음 |
 
 ### 보고 형식 (설치 전 사용자에게 제시)
 
@@ -31,6 +32,16 @@
 - 상업적 사용 금지 조항 포함 라이선스
 - 사용자별 라이선스 계약(EULA) 필요 패키지
 - 라이선스 불명확 또는 미공개 패키지
+
+### 패키지 출처(채널·저장소)까지 확인 (필수) ⚠️
+
+**도구 자체의 라이선스만 보지 말 것. 실제로 패키지를 "어디서 받는지"(채널/저장소)까지 확인한다.** 도구가 OSS여도 저장소 사용에 별도 약관이 붙을 수 있다. (과거 conda 사례를 놓친 적 있음 — 재발 금지)
+
+- **conda**: 도구 자체는 BSD(무료)지만 **Anaconda `defaults` 채널 / Miniconda / Anaconda Distribution(`repo.anaconda.com`)** 은 **Anaconda Terms of Service** 적용 → **200명 초과 조직의 상업적 사용은 유료**(Anaconda Business). ETRI는 임계 초과 가능 → 반드시 **Miniforge + conda-forge**로 회피하고 `conda list --show-channel-urls | grep -c defaults` 로 **0** 확인.
+- **Docker 이미지 / 서드파티 빌드 스크립트**: 직접 설치하지 않더라도 내부에서 conda/pip/apt로 무엇을 어느 채널에서 끌어오는지 **Dockerfile·install 스크립트를 열어 확인**하고, 빌드 후 `conda list --show-channel-urls` / `pip list` 등으로 실측한다.
+- **숨은 전이 의존성**: 내가 직접 설치한 게 아니어도 이미지/스크립트가 가져오는 패키지의 출처·라이선스를 점검한다.
+
+→ 이런 출처 약관 리스크가 보이면 **설치/빌드 전에 보고하고 승인**을 받는다.
 
 ---
 
