@@ -135,7 +135,12 @@ ERTI_OUT = {
 def resolve_paths():
     """--index 또는 --env 로부터 env(.usda)와 collision(.usdc) 경로를 만든다."""
     if args.env:
-        env_path = os.path.abspath(args.env)
+        # 상대경로는 스크립트 위치 기준으로 앵커 (컨테이너 cwd가 /isaac-sim이어도 동작)
+        env_path = args.env
+        if not os.path.isabs(env_path):
+            env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    env_path)
+        env_path = os.path.abspath(env_path)
         d = os.path.dirname(env_path)
         base = os.path.basename(env_path).replace("_robot.usda", "")
         coll = os.path.join(d, f"{base}_collision.usdc")

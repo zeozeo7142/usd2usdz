@@ -649,3 +649,103 @@ ROBOT_PATH="/Isaac/Robots/Clearpath/Jackal/jackal.usd"
 ```
 RViz Fixed Frame은 `world`(필요시 `lidar`). PointCloud2/Image는 Best Effort QoS.
 ※ 멀리 주행해도 Views Target Frame=base_link로 시점이 로봇을 따라감(11-12).
+
+---
+---
+
+# Part 3. 신규 데이터셋(NOEUN·WC) 변환 + 대용량 NuRec 함정 (2026-07-30 추가)
+
+ETRI 외 신규 PortalCam 데이터셋 2종(노은역 NOEUN, 월드컵경기장역 WC)을 변환하며
+**입력 포맷 차이**와 **대용량 NuRec의 USDZ 2GiB 오프셋 버그**를 발견·해결했다.
+
+## 14. NOEUN·WC 변환 — 성공
+
+**이유**: `/USDZ/USDZ_NOEUN`, `/USDZ/USDZ_WC` 데이터를 Isaac용 GS+메쉬로 변환.
+
+**입력 포맷 차이 (ETRI와 다름)**: `.usd`(인라인 GS) 없이 **표준 3DGS PLY**를 직접 제공.
+```
+USDZ_NOEUN/  point_cloud.ply(4.6G, 19,614,166 splat) + environment.ply(4.5M, 초희소 프리뷰) + noeun_station.obj(26M)
+USDZ_WC/     point_cloud.ply(2.8G, 11,775,110 splat) + environment.ply(1.7M) + world_cup_stadium_station.obj(15M)
+```
+PLY 헤더가 `f_dc_0..2, f_rest_0..44, opacity, scale_0..2, rot_0..3` (source=PortalCam) → **이미 표준 3DGS**.
+
+**작업**: ETRI의 `gs_to_ply.py`(USD→PLY) 단계 **불필요** → `point_cloud.ply`를 3dgrut(Miniforge 클린 이미지)에 **직접** 투입.
+```bash
+docker run --rm --gpus '"device=0"' -v /home/zeozeo/git/usd2usdz:/usd2usdz 3dgrut:cuda128 \
+  conda run -n 3dgrut python -m threedgrut.export.scripts.ply_to_usd \
+    /usd2usdz/USDZ/USDZ_NOEUN/point_cloud.ply \
+    --output_file /usd2usdz/output/USDZ_NOEUN/noeun_station_nurec.usdz
+```
+- OBJ는 `output/USDZ_<name>/<base>_mesh.obj`로 복사, `_nurec_mesh.usda`(upAxis=Z, GS+메쉬 참조) 작성.
+- `environment.ply`(초희소 프리뷰)는 스킵. GPU는 --rm으로 반납.
+
+**결과**: NOEUN `noeun_station_nurec.usdz`(2.2G, nurec 2,314MB), WC `world_cup_stadium_station_nurec.usdz`(1.3G, nurec 1,389MB) 생성. 둘 다 OmniNuRecFieldAsset/Z-up 정상.
+
+## 15. 정렬(alignment) 검증 방법 — headless
+
+**이유**: GS는 GUI에서만 렌더되어 헤드리스로 육안 확인 불가 → **좌표로 정렬을 객관 검증**.
+
+**작업**: GS 경계는 PLY 헤더 `comment min/max`(또는 splat 위치 표본 백분위), 메쉬 경계는 OBJ 정점 bbox로 계산해 비교.
+
+**결과(NOEUN)**: GS 중앙값 X=7.6/Y=−4.1, 메쉬 중심 X=9.0/Y=−4.9, Z바닥 −8.0/−7.5 **일치**, 축 교환 없음 → **동일 좌표계, 회전·스케일 보정 불필요**.
+- 주의: bbox 크기는 GS가 배경/floater로 훨씬 커 IoU가 낮게 나오지만, 이는 정렬 문제가 아니라 스플랫 분포 차이. **중앙값/축교환/Z바닥**으로 판정할 것.
+
+## 16. 대용량 NuRec USDZ가 Isaac에서 안 보임(검은 화면) — 원인·해결 (핵심)
+
+**증상**: NOEUN `_nurec_mesh.usda`를 Isaac에서 열면 Mesh만 회색으로 보이고, Mesh를 끄면 **완전 검은 화면**. GS가 렌더 안 됨. GPU VRAM 1.3GiB만 사용(2.3GB nurec 미로드).
+
+**원인 분석**: Isaac Console 에러
+`In </World/GaussianSplats/gauss>: Could not open asset @gauss.usda@ ... introduced by @...noeun_station_nurec.usdz@`
+→ usdz 내부 `gauss.usda`(NuRec Volume 정의)를 못 엶 → Volume 미구성 → 검은 화면.
+- 구조는 ETRI(정상)와 **완전 동일**, zip 무결성도 정상. 차이는 **크기**뿐.
+- **진짜 원인**: usdz 안에서 파일 순서가 `default.usda → .nurec → gauss.usda`인데, **`.nurec`이 2.15 GiB(>2^31)** 라 뒤의 `gauss.usda` 데이터 오프셋이 **2,314,651,035 > 2^31(2,147,483,648)**. USD의 zip 리졸버가 32비트 오프셋을 넘겨 못 엶.
+- ETRI(nurec 364MB, offset 3.6e8)·WC(nurec 1.39GB, offset 1.39e9)는 **2GiB 미만이라 정상**.
+
+**해결**: usdz를 디스크로 풀어 zip 리졸버를 우회.
+```bash
+# usdz → 폴더로 추출 (default.usda + gauss.usda + .nurec)
+python3 -c "import zipfile; zipfile.ZipFile('output/USDZ_NOEUN/noeun_station_nurec.usdz').extractall('output/USDZ_NOEUN/noeun_station_nurec')"
+# _nurec_mesh.usda 의 GS 참조를 usdz → 추출된 default.usda 로 변경
+#   @./noeun_station_nurec.usdz@  →  @./noeun_station_nurec/default.usda@
+```
+디스크에서는 `default.usda→gauss.usda→.nurec` 상대참조가 zip 오프셋 없이 정상 해석됨(TM.md 7절 "USDZ보다 USDA 직접 참조가 안정적"과 동일 교훈).
+
+**결과**: NuRec Volume/OmniNuRecFieldAsset 정상 구성 → Isaac에서 GS 렌더 성공(사용자 확인). WC는 2GiB 미만이라 usdz 그대로 정상.
+
+→ **규칙**: 변환 후 `.nurec`이 **2 GiB를 넘으면** usdz를 디스크로 풀어 `default.usda`를 참조한다.
+
+## 17. make_collision_env.py `--floor-shape full` — VisualMesh 위 주행 비교
+
+**이유**: 평탄화 바닥 vs 울퉁불퉁 원본 메쉬 주행 비교 요청.
+
+**작업**: `--floor-shape full` 추가 → 바닥/장애물 분리 없이 **전체 스캔 메쉬(=VisualMesh와 동일 형상)를 단일 collider**(approx=none, invisible)로 저작. 평탄 버전을 안 덮도록 `_meshfloor_` 접미사로 분리 저장(`_meshfloor_collision.usdc`/`_meshfloor_robot.usda`). teleop/sensor_drive의 `_robot.usda→_collision.usdc` 유도 규칙과 호환되는 이름.
+
+**결과**: ETRI1 생성 완료(`/Colliders/FullMesh` 47,065 faces). 두 환경을 `--env`로 바꿔가며 주행/LiDAR 비교 가능:
+```bash
+./run-sensor-drive.sh --index 1                                                   # 평탄
+./run-sensor-drive.sh --env output/USDZ_ETRI1/260521_ERTI_1_meshfloor_robot.usda  # 원본 메쉬
+```
+
+## 18. `--env` 상대경로 앵커 버그 — 수정
+
+**증상**: `run-sensor-drive.sh --env output/...`(상대경로) 실행 시 `환경 없음: /isaac-sim/output/...` 에러.
+**원인**: `--env`가 `os.path.abspath()`로 **컨테이너 cwd(/isaac-sim)** 기준으로 풀림. (`--index`는 이미 스크립트 위치 앵커라 정상)
+**작업**: `sensor_drive.py`·`teleop_test.py` 둘 다 `--env` 상대경로를 **스크립트 디렉토리 기준**으로 앵커하도록 수정.
+**결과**: cwd와 무관하게 상대경로 `--env` 동작.
+
+## 19. Part 3 최종 파일 구조
+
+```
+output/USDZ_NOEUN/
+├── noeun_station_nurec_mesh.usda        ← Isaac에서 열 파일 (GS 참조 = 추출 폴더)
+├── noeun_station_nurec/                 ← usdz 추출본 (2GiB 초과 우회)
+│   ├── default.usda / gauss.usda / noeun_station_nurec.nurec(2.3G)
+├── noeun_station_nurec.usdz             ← 원본 usdz (2.2G, 참조엔 미사용)
+└── noeun_station_mesh.obj
+
+output/USDZ_WC/
+├── world_cup_stadium_station_nurec_mesh.usda   ← Isaac에서 열 파일 (usdz 직접 참조 OK)
+├── world_cup_stadium_station_nurec.usdz        ← 1.3G (2GiB 미만이라 정상)
+└── world_cup_stadium_station_mesh.obj
+```
+> ⚠️ `.nurec`/`.usdz`는 수 GB 대용량 → git 커밋 제외(코드/문서/스크립트만 커밋).

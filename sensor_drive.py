@@ -100,7 +100,11 @@ CAM_OFFSET = (0.2, 0.0, 0.25)
 
 def resolve_paths():
     if args.env:
-        env = os.path.abspath(args.env)
+        # 상대경로는 스크립트 위치 기준으로 앵커 (컨테이너 cwd가 /isaac-sim이어도 동작)
+        env = args.env
+        if not os.path.isabs(env):
+            env = os.path.join(os.path.dirname(os.path.abspath(__file__)), env)
+        env = os.path.abspath(env)
         d, base = os.path.dirname(env), os.path.basename(env).replace("_robot.usda", "")
     elif args.index:
         od, base = ERTI_OUT[args.index]

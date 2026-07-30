@@ -320,7 +320,7 @@ def _bind_physics_material(prim, mat):
 
 def write_collision_usdc(out_path, obstacle_pts, obstacle_faces,
                          floor_meshes, levels, floor_shape, approx,
-                         spawn=None, friction=0.9):
+                         spawn=None, friction=0.9, full_mesh=None):
     from pxr import Usd, UsdGeom, Sdf, Gf
 
     stage = Usd.Stage.CreateNew(out_path)           # .usdc → crate 자동
@@ -345,28 +345,40 @@ def write_collision_usdc(out_path, obstacle_pts, obstacle_faces,
                                  static_f=friction, dynamic_f=friction * 0.9)
     collider_prims = []
 
-    # 벽/계단/나무/울타리 등 장애물 (원본 형상 유지, approximation=none)
-    collider_prims.append(_author_mesh(stage, "/Colliders/Obstacles",
-                          obstacle_pts, obstacle_faces, approx))
-
-    # 레벨별 바닥 collider
-    #   slab : footprint bbox를 덮는 구멍 없는 박스 (로봇 추락 방지, 기본값)
-    #   mesh : 바닥면을 level_z로 스냅한 메쉬 (footprint·구멍 그대로 보존)
-    if floor_shape == "slab":
-        for i, l in enumerate(levels):
-            collider_prims.append(
-                _author_floor_slab(stage, f"/Colliders/Floor_{i}", l))
+    if floor_shape == "full":
+        # VisualMesh와 동일한 전체 스캔 메쉬를 단일 collider로 (바닥/장애물 분리 안 함).
+        # → 평탄화 없이 원본 울퉁불퉁 표면 위 주행. 평탄(slab) 버전과 비교용.
+        fpts, ffaces = full_mesh
+        collider_prims.append(
+            _author_mesh(stage, "/Colliders/FullMesh", fpts, ffaces, approx))
     else:
-        for i, (pts, faces, _z) in enumerate(floor_meshes):
-            collider_prims.append(
-                _author_mesh(stage, f"/Colliders/Floor_{i}", pts, faces, approx))
+        # 벽/계단/나무/울타리 등 장애물 (원본 형상 유지, approximation=none)
+        collider_prims.append(_author_mesh(stage, "/Colliders/Obstacles",
+                              obstacle_pts, obstacle_faces, approx))
+
+        # 레벨별 바닥 collider
+        #   slab : footprint bbox를 덮는 구멍 없는 박스 (로봇 추락 방지, 기본값)
+        #   mesh : 바닥면을 level_z로 스냅한 메쉬 (footprint·구멍 그대로 보존)
+        if floor_shape == "slab":
+            for i, l in enumerate(levels):
+                collider_prims.append(
+                    _author_floor_slab(stage, f"/Colliders/Floor_{i}", l))
+        else:
+            for i, (pts, faces, _z) in enumerate(floor_meshes):
+                collider_prims.append(
+                    _author_mesh(stage, f"/Colliders/Floor_{i}", pts, faces,
+                                 approx))
 
     for prim in collider_prims:
         _bind_physics_material(prim, mat)
 
     stage.GetRootLayer().Save()
-    print(f"[write_collision_usdc] 저장: {out_path} "
-          f"(장애물 1 + 바닥 {len(levels)} [{floor_shape}], 마찰 {friction})")
+    if floor_shape == "full":
+        print(f"[write_collision_usdc] 저장: {out_path} "
+              f"(전체 메쉬 collider [full], 마찰 {friction})")
+    else:
+        print(f"[write_collision_usdc] 저장: {out_path} "
+              f"(장애물 1 + 바닥 {len(levels)} [{floor_shape}], 마찰 {friction})")
 
 
 # --------------------------------------------------------------------------- #
@@ -430,9 +442,12 @@ def main():
                     help="레벨 검출 임계 (최대 bin 면적 대비 비율)")
     ap.add_argument("--min-level-area", type=float, default=10.0,
                     help="auto 모드에서 바닥 레벨로 인정할 최소 면적(㎡)")
-    ap.add_argument("--floor-shape", choices=["slab", "mesh"], default="slab",
+    ap.add_argument("--floor-shape", choices=["slab", "mesh", "full"],
+                    default="slab",
                     help="slab: 구멍 없는 박스 바닥(추락 방지, 기본) / "
-                         "mesh: 바닥 footprint·구멍 그대로 보존")
+                         "mesh: 바닥 footprint·구멍 그대로 보존 / "
+                         "full: VisualMesh와 동일한 전체 스캔 메쉬를 collider로"
+                         "(울퉁불퉁 원본 위 주행, 비교용 _meshfloor_robot.usda 생성)")
     ap.add_argument("--friction", type=float, default=0.9,
                     help="바닥/벽 collider 정지마찰 계수 (바퀴 슬립 방지)")
     ap.add_argument("--floor-angle", type=float, default=60.0,
@@ -462,8 +477,11 @@ def main():
 
     mesh_obj = os.path.join(out_dir, f"{base}_mesh.obj")
     nurec = os.path.join(out_dir, f"{base}_nurec.usdz")
-    collision = os.path.join(out_dir, f"{base}_collision.usdc")
-    robot = os.path.join(out_dir, f"{base}_robot.usda")
+    # full 모드는 평탄(slab) 버전을 덮어쓰지 않도록 _meshfloor 접미사로 분리 저장.
+    # (teleop_test.resolve_paths가 _robot.usda→_collision.usdc 유도 → 호환되는 이름)
+    variant = "_meshfloor" if args.floor_shape == "full" else ""
+    collision = os.path.join(out_dir, f"{base}{variant}_collision.usdc")
+    robot = os.path.join(out_dir, f"{base}{variant}_robot.usda")
 
     # OBJ 소스: out_dir의 _mesh.obj 우선, 없으면 원본
     if not os.path.exists(mesh_obj):
@@ -504,7 +522,8 @@ def main():
     # D. 충돌 에셋
     write_collision_usdc(collision, obstacle_pts, obstacle_faces,
                          floor_meshes, levels, args.floor_shape, args.approx,
-                         spawn=spawn, friction=args.friction)
+                         spawn=spawn, friction=args.friction,
+                         full_mesh=(points, faces))
     # E. 최상위 씬
     write_robot_usda(robot, out_dir, nurec, mesh_obj, collision,
                      args.rotate_x, args.physics_scene)

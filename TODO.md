@@ -302,6 +302,63 @@
 
 ---
 
+## Step 10: 신규 PortalCam 데이터셋 변환 (표준 3DGS PLY 입력)
+
+> ETRI는 `.usd`(인라인 GS)였지만, 신규 데이터셋(NOEUN=노은역, WC=월드컵경기장역 등)은
+> **표준 3DGS PLY**(`point_cloud.ply`)를 직접 제공 → **Step 3(gs_to_ply.py) 불필요**, 3dgrut에 바로 투입.
+> 예시 경로는 NOEUN 기준(실제 실행값).
+
+- [x] **10-1.** 입력 확인 (PLY가 표준 3DGS인지)
+  ```bash
+  awk '/^end_header/{exit} /element vertex|source|f_dc_0|scale_2|rot_3/{print}' USDZ/USDZ_NOEUN/point_cloud.ply
+  # → f_dc_0/scale_2/rot_3 있고 source PortalCam 이면 표준 3DGS (NOEUN 19,614,166 splat)
+  ```
+  구성: `point_cloud.ply`(조밀 GS) + `environment.ply`(초희소 프리뷰, 스킵) + `*_station.obj`(메쉬)
+
+- [x] **10-2.** 출력 디렉토리 준비 + OBJ 복사 (출력 dir명=입력 dir명)
+  ```bash
+  mkdir -p output/USDZ_NOEUN
+  cp USDZ/USDZ_NOEUN/noeun_station.obj output/USDZ_NOEUN/noeun_station_mesh.obj
+  ```
+
+- [x] **10-3.** PLY → NuRec USDZ (3dgrut, 빈 GPU 사용, --rm으로 반납)
+  ```bash
+  docker run --rm --gpus '"device=0"' \
+    -v /home/zeozeo/git/usd2usdz:/usd2usdz \
+    3dgrut:cuda128 conda run -n 3dgrut \
+    python -m threedgrut.export.scripts.ply_to_usd \
+      /usd2usdz/USDZ/USDZ_NOEUN/point_cloud.ply \
+      --output_file /usd2usdz/output/USDZ_NOEUN/noeun_station_nurec.usdz
+  # → noeun_station_nurec.usdz (2.2G, nurec 2,314MB, OmniNuRecFieldAsset/Z-up)
+  ```
+  > ⚠️ 라이선스 클린 이미지(Miniforge). 빈 GPU 확인: `nvidia-smi`. 변환 후 GPU 자동 반납.
+
+- [x] **10-4.** 통합 USDA 작성 (`*_nurec_mesh.usda`, upAxis=Z, GS+메쉬 참조)
+  ```usda
+  #usda 1.0
+  ( defaultPrim = "World"  metersPerUnit = 1  upAxis = "Z" )
+  def Xform "World" {
+      def Xform "GaussianSplats" ( prepend references = @./noeun_station_nurec.usdz@ ) {}
+      def Xform "Mesh"           ( prepend references = @./noeun_station_mesh.obj@ ) {}
+  }
+  ```
+
+- [ ] **10-5.** ⚠️ **`.nurec`이 2 GiB 초과 시 필수**: usdz를 디스크로 풀어 참조 (Isaac zip 리졸버 2GiB 오프셋 버그 우회)
+  ```bash
+  # 증상: Isaac에서 GS 검은 화면 + Console "Could not open asset @gauss.usda@"
+  python3 -c "import zipfile; zipfile.ZipFile('output/USDZ_NOEUN/noeun_station_nurec.usdz').extractall('output/USDZ_NOEUN/noeun_station_nurec')"
+  # 그리고 *_nurec_mesh.usda 의 GS 참조를 아래처럼 변경:
+  #   @./noeun_station_nurec.usdz@  →  @./noeun_station_nurec/default.usda@
+  ```
+  > `.nurec` < 2 GiB (예: WC 1.39GB)면 이 단계 불필요 — usdz 직접 참조로 정상.
+  > 검증: `python3 -c "from pxr import Usd; print([str(p.GetPath()) for p in Usd.Stage.Open('output/USDZ_NOEUN/noeun_station_nurec_mesh.usda').Traverse() if p.GetTypeName()=='Volume'])"` → Volume prim이 나오면 OK.
+
+- [x] **10-6.** Isaac Sim 5.1에서 `*_nurec_mesh.usda` 열어 GS+메쉬 렌더/정렬 확인
+  > GS는 GUI 뷰포트에서만 렌더. Mesh를 껐을 때 포토리얼 GS가 보이면 정상.
+  > 정렬 사전확인(headless): GS 위치 중앙값(PLY 표본)과 메쉬 bbox 중심의 X·Y·Z바닥이 맞고 축교환 없으면 정렬됨.
+
+---
+
 ## 필요 파일 요약
 
 ```
