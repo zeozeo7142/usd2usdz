@@ -359,6 +359,39 @@
 
 ---
 
+## Step 11: 이미 패키징된 usdz + 평탄 슬랩 버전 (TRAIN=subway_car)
+
+> 일부 데이터셋은 **완성된 NuRec usdz**(GS+mesh+콜라이더 포함)로 제공된다.
+> 이 경우 변환 불필요 — 그대로 열거나, ETRI식 평탄 슬랩 버전만 추가로 만든다.
+
+- [x] **11-1.** usdz 내용 확인 (이미 완성품인지)
+  ```bash
+  python3 -c "import zipfile; [print(i.filename, round(i.file_size/1e6,1),'MB') for i in zipfile.ZipFile('USDZ/USDZ_TRAIN/subway_car.usdz').infolist()]"
+  # → default.usda / model.nurec / gauss.usda / mesh.usd(+.ply) 이면 완성 NuRec 패키지
+  ```
+  `.nurec` < 2 GiB면 그대로 Isaac에서 열면 GS+mesh(+번들 콜라이더) 렌더됨.
+
+- [x] **11-2.** ETRI식 평탄 슬랩 버전 생성 (선택)
+  ```bash
+  python3 make_train_collision.py
+  # → output/USDZ_TRAIN/subway_car_slab_collision.usdc (평탄 슬랩 + 장애물)
+  # → output/USDZ_TRAIN/subway_car_slab_robot.usda    (GS + 시각메쉬 + 슬랩, 번들 콜라이더 off)
+  ```
+  > 번들 메쉬 콜라이더는 `physics:collisionEnabled=false`로 끄고 평탄 슬랩으로 대체.
+  > 기본 스폰은 스크립트 상단 `FIXED_SPAWN=(3.3,-12.0,0.3)` (None이면 자동 층검출).
+  > ⚠️ 지하철역은 여러 층(선로/승강장) 검출됨 → FIXED_SPAWN 또는 `--spawn`으로 지정 권장.
+
+- [x] **11-3.** GUI로 직접 주행 (run-teleop.sh)
+  ```bash
+  ./run-teleop.sh --env output/USDZ_TRAIN/subway_car_slab_robot.usda
+  ./run-teleop.sh --env output/USDZ_TRAIN/subway_car_slab_robot.usda --spawn 3.3,-12,0.3   # 스폰 수동
+  ./run-teleop.sh --env output/USDZ_TRAIN/subway_car_slab_robot.usda --show-colliders      # 슬랩 표시
+  ```
+  > 창이 뜨면 W/S 전후, A/D 회전, Space 정지, R 리셋, ESC 종료.
+  > 로봇 안 보이면 Stage에서 `/World/TeleopRobot` 선택 → 뷰포트에서 F키(프레임).
+
+---
+
 ## 필요 파일 요약
 
 ```

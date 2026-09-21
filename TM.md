@@ -749,3 +749,71 @@ output/USDZ_WC/
 └── world_cup_stadium_station_mesh.obj
 ```
 > ⚠️ `.nurec`/`.usdz`는 수 GB 대용량 → git 커밋 제외(코드/문서/스크립트만 커밋).
+
+---
+---
+
+# Part 4. TRAIN(subway_car) — 완성 NuRec 패키지 + 평탄 슬랩 버전 (2026-09-21 추가)
+
+## 20. TRAIN 입력은 '이미 변환된' NuRec+메쉬 패키지 — 변환 불필요
+
+**증상/발견**: `/USDZ/USDZ_TRAIN`에는 PLY/OBJ가 아니라 **단일 `subway_car.usdz`(837MB)** 하나뿐.
+아카이브를 열어보니 이미 완성된 NuRec 패키지:
+```
+default.usda  /  model.nurec(874MB)  /  gauss.usda  /  mesh.ply(2MB)  /  mesh.usd(1.2MB, crate)
+```
+- `gauss.usda`가 Volume(GS) + `over "mesh"`(→mesh.usd) 를 모두 담고, mesh를 NuRec `proxy`로 지정.
+- 번들 `mesh.usd`의 `/mesh`(96,024 faces)에 **이미 `CollisionAPI`+`MeshCollisionAPI(approx=none)`** 적용 → 원본(울퉁불퉁) 콜라이더 포함.
+- `model.nurec` 874MB < 2GiB → **usdz 오프셋 버그 없음**(Part 3의 2GiB 함정 대상 아님).
+
+**결론**: 변환/GPU 불필요. `USDZ/USDZ_TRAIN/subway_car.usdz`를 Isaac에서 그대로 열면 GS+메쉬(+콜라이더)가 나온다. (내가 처음에 output에 추출/통합 USDA를 만들었으나 사족이라 제거)
+
+## 21. ETRI식 평탄 슬랩 버전 추가 (make_train_collision.py) — 성공
+
+**이유**: 번들 콜라이더는 울퉁불퉁 원본 메쉬 그대로다. ETRI식 '평탄 슬랩' 주행 버전을 추가로 요청받음.
+(참고: `make_collision_env.py`의 `--floor-shape` 기본값이 `slab`이라, ETRI에서 평탄 슬랩은 **기본 적용**이었다.)
+
+**작업**: `make_train_collision.py` 신규 작성 — `make_collision_env`의 함수(face_geometry/detect_levels/build_collision_geometry/compute_spawn/write_collision_usdc) 재사용.
+1. `subway_car.usdz` → `output/USDZ_TRAIN/subway_car/` 로 추출(GS default.usda 참조 + mesh 확보).
+2. `mesh.usd`에서 정점/삼각형 로드(pxr, fan triangulate) → 58,991 verts / 96,024 tris.
+3. 평탄 슬랩 충돌 생성(UP=Z). 지하철역이라 **3개 층 검출**: z=−1.538(선로 6533f) / −1.336(중간 2123f) / −0.197(승강장 10320f).
+4. `subway_car_slab_robot.usda` 작성:
+   - `./subway_car/default.usda` 참조(GS + 시각 메쉬)
+   - **번들 메쉬 콜라이더 비활성화**: `/World/SubwayCar/gauss/mesh` 에 `physics:collisionEnabled=false` override (시각용으로만 유지)
+   - `./subway_car_slab_collision.usdc` 참조(평탄 슬랩 3층 + 장애물)
+   - physicsScene(중력 −Z)
+
+**결과**: `output/USDZ_TRAIN/subway_car_slab_collision.usdc` + `subway_car_slab_robot.usda` 생성. 검증: GS Volume ✅ / 번들 메쉬 visible+collisionEnabled=false ✅ / 슬랩 Cube 3개 + 장애물 1 ✅ / physicsScene ✅.
+
+**헤드리스 주행 검증(GPU 0, --rm)**: `teleop_test.py --no-visual --headless` 로 Jackal 자동주행 →
+슬랩 위 높이 바닥+0.23~0.28m 안정 유지(관통·튐 없음), +Y로 ~4.5m 전진 후 벽(장애물)에서 정지. GPU 반납 확인.
+
+## 22. 스폰 층 선택 & 고정 스폰
+
+**증상**: `compute_spawn`이 항상 **최저층**(`min fm[2]`)을 골라, 지하철역에서 선로쪽에 스폰됨.
+**작업/결과**:
+- 처음엔 '가장 넓은 층(승강장, faces 최대)'을 넘기도록 했으나 위치가 부적절.
+- 최종: 사용자가 GUI에서 확인한 좌표를 **`FIXED_SPAWN = (3.3, -12.0, 0.3)`** 상수로 baking(None이면 자동 층검출).
+- ⚠️ teleop_test는 spawnPoint.z를 '바닥높이'로 보고 **+max(0.3, wheel_r×2)** 만큼 위에 로봇을 놓는다([teleop_test.py](teleop_test.py) 참고).
+
+## 23. GUI 주행 런처 (run-teleop.sh) & 스폰 수동 지정
+
+**이유**: 헤드리스는 GS가 안 보여, 직접 보며 몰 GUI 실행이 필요.
+**작업**: `run-teleop.sh` — 호스트에서 Isaac(GUI) 컨테이너를 띄워 `teleop_test.py`를 인자 그대로 실행(비헤드리스, DISPLAY/Xauthority, run-isaac-sim-5.1.sh와 동일 GUI 설정).
+```bash
+./run-teleop.sh --env output/USDZ_TRAIN/subway_car_slab_robot.usda            # 평탄 슬랩 주행
+./run-teleop.sh --env ... --spawn 3.3,-12,0.3                                 # 스폰 좌표 수동 지정
+./run-teleop.sh --env ... --show-colliders                                    # 슬랩 콜라이더 표시
+```
+**스폰 수동 지정 방법**: (1) `--spawn x,y,z` 인자, (2) GUI에서 `/World/TeleopRobot` 선택→W(이동 기즈모) 드래그, (3) R키=스폰 리셋. 로봇이 안 보이면 `/World/TeleopRobot` 선택 후 뷰포트에서 F키(프레임).
+
+## 24. Part 4 파일 구조
+```
+USDZ/USDZ_TRAIN/subway_car.usdz               ← 원본(완성 NuRec+메쉬+콜라이더). 그냥 열어도 됨
+output/USDZ_TRAIN/
+├── subway_car_slab_robot.usda                ← 평탄 슬랩 주행용 (이걸 연다)
+├── subway_car_slab_collision.usdc            ← 평탄 슬랩 3층 + 장애물, spawnPoint(3.3,-12,0.3)
+└── subway_car/                               ← usdz 추출본 (default.usda/gauss.usda/model.nurec/mesh.usd)
+make_train_collision.py                       ← 슬랩 생성 스크립트(make_collision_env 재사용)
+run-teleop.sh                                 ← GUI 주행 런처
+```
