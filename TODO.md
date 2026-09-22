@@ -381,6 +381,14 @@
   > 기본 스폰은 스크립트 상단 `FIXED_SPAWN=(3.3,-12.0,0.3)` (None이면 자동 층검출).
   > ⚠️ 지하철역은 여러 층(선로/승강장) 검출됨 → FIXED_SPAWN 또는 `--spawn`으로 지정 권장.
 
+  단일 완성품 usdz(GS+메쉬+슬랩+physicsScene 한 파일)도 원하면 `--usdz` 추가:
+  ```bash
+  python3 make_train_collision.py --usdz
+  # → output/USDZ_TRAIN/subway_car_slab.usdz (837MB, 그냥 열면 됨)
+  ```
+  > usdz는 nurec 중복·수정불편·2GiB 한계 있음 → 편집/주행엔 usda, 배포엔 usdz.
+  > (헤드리스 검증: usdz 로드 정상 + 슬랩 위 안착 확인. GS 시각은 GUI에서 확인)
+
 - [x] **11-3.** GUI로 직접 주행 (run-teleop.sh)
   ```bash
   ./run-teleop.sh --env output/USDZ_TRAIN/subway_car_slab_robot.usda

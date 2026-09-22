@@ -814,6 +814,17 @@ output/USDZ_TRAIN/
 ├── subway_car_slab_robot.usda                ← 평탄 슬랩 주행용 (이걸 연다)
 ├── subway_car_slab_collision.usdc            ← 평탄 슬랩 3층 + 장애물, spawnPoint(3.3,-12,0.3)
 └── subway_car/                               ← usdz 추출본 (default.usda/gauss.usda/model.nurec/mesh.usd)
-make_train_collision.py                       ← 슬랩 생성 스크립트(make_collision_env 재사용)
+make_train_collision.py                       ← 슬랩 생성 스크립트(make_collision_env 재사용), --usdz로 단일 패키지도 생성
 run-teleop.sh                                 ← GUI 주행 런처
 ```
+
+## 25. (선택) 단일 완성품 usdz — subway_car.usdz처럼 한 파일로
+
+**이유**: usdc+usda 다중 참조 말고 원본처럼 '하나의 완성품'을 원함.
+**작업**: `make_train_collision.py --usdz` → `UsdUtils.CreateNewUsdzPackage`로 slab_robot.usda를 패키징 → `output/USDZ_TRAIN/subway_car_slab.usdz`(837MB). GS(model.nurec)+시각메쉬+평탄슬랩+physicsScene, 번들 콜라이더 off까지 한 파일에 포함.
+**주의/트레이드오프**:
+- `.nurec`은 바이너리라 usda 한 파일엔 못 넣음 → 자기완결형은 **usdz(zip)만** 가능.
+- 패키징 시 `Failed to resolve @0/gauss.usda@` 경고가 뜨지만 **무해**(USD 패키지 리졸버가 최종 해결, 검증에서 Volume+필드+슬랩 정상 구성).
+- subway_car는 nurec 874MB(<2GiB)라 안전. **NOEUN처럼 >2GiB면 이 방식 불가**(zip 오프셋 버그, Part 3-16 참고).
+- nurec 중복 저장·수정 시 재패키징 필요 → **편집/주행엔 usda 참조, 배포/핸드오프엔 단일 usdz** 권장.
+**검증**: 헤드리스 teleop으로 usdz 직접 로드 성공 + 로봇이 평탄 슬랩(z≈−0.12)에 안착(선로 관통 없음). GS 시각은 GUI 확인 필요(헤드리스 렌더 불가).

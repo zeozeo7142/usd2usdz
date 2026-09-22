@@ -11,6 +11,7 @@ subway_car.usdz는 이미 NuRec GS + 메쉬 + (울퉁불퉁 원본 그대로의)
 사용: python3 make_train_collision.py   (GPU 불필요, numpy + usd-core만)
 """
 import os
+import sys
 import math
 import zipfile
 
@@ -115,6 +116,19 @@ def main():
     st.GetRootLayer().Save()
 
     print(f"=== 완료 ===\n  충돌: {coll}\n  로드: {robot}")
+
+    # 5) (선택) 단일 완성품 usdz로 패키징 — GS+메쉬+평탄슬랩+physicsScene 한 파일
+    #    subway_car.usdz처럼 그냥 열면 됨. nurec<2GiB일 때만 안전(오프셋 버그).
+    if "--usdz" in sys.argv:
+        from pxr import UsdUtils
+        pkg = os.path.join(OUT_DIR, f"{BASE}_slab.usdz")
+        if os.path.exists(pkg):
+            os.remove(pkg)
+        if UsdUtils.CreateNewUsdzPackage(robot, pkg):
+            mb = os.path.getsize(pkg) / 1e6
+            print(f"  단일 usdz: {pkg} ({mb:.0f} MB)")
+        else:
+            print("  [경고] usdz 패키징 실패")
 
 
 if __name__ == "__main__":
